@@ -1,0 +1,45 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# builds
+.next/
+out/
+build/
+dist/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# environment & secrets
+.env
+.env.local
+.env*.local
+backend/.env
+!.env.example
+backend/.env.example
+
+# databases & infra (local runs)
+servers/
+db/
+*.db
+
+# logs
+*.log
+logs/
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# misc artifacts
+research/
+tool-results/
+agent-ctx/

@@ -1,0 +1,158 @@
+# =====================================================================
+# EvalixAI — full stack (product spec architecture)
+#
+#   frontend   Next.js 16 (App Router)          → :3000
+#   backend    FastAPI + Motor + JWT            → :8000
+#   mongo      MongoDB 7 (primary data store)
+#   redis      Redis 7 (sessions, rate limits, cache)
+#   qdrant     Qdrant (semantic resume matching)
+#   s3         SeaweedFS S3 gateway (object storage; the open-source
+#              MinIO server was archived upstream, SeaweedFS is the
+#              S3-compatible replacement — any S3 endpoint works)
+#
+# Usage:
+#   cp .env.example .env        # then edit secrets
+#   docker compose up -d --build
+#   docker compose --profile seed run --rm seed   # demo dataset + demo user
+#
+# Demo login (after seeding): demo@evalix.ai / Demo1234!
+# =====================================================================
+
+services:
+  # ---------------- MongoDB (primary data store) ----------------
+  mongo:
+    image: mongo:7
+    container_name: evalix-mongo
+    restart: unless-stopped
+    command: ["mongod", "--quiet"]
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+    ports:
+      - "127.0.0.1:27018:27017" # host access for local tooling
+
+  # ---------------- Redis (sessions / rate limiting / cache) ----------------
+  redis:
+    image: redis:7-alpine
+    container_name: evalix-redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-evalix_redis_2024}", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-evalix_redis_2024}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    ports:
+      - "127.0.0.1:6380:6379"
+
+  # ---------------- Qdrant (semantic resume matching) ----------------
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    container_name: evalix-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    ports:
+      - "127.0.0.1:6333:6333" # REST / dashboard
+
+  # ---------------- SeaweedFS S3 gateway (object storage) ----------------
+  s3:
+    image: chrislusf/seaweedfs:latest
+    container_name: evalix-s3
+    restart: unless-stopped
+    command: ["server", "-dir=/data", "-s3", "-s3.port=9000", "-ip=0.0.0.0", "-master.port=9333", "-volume.port=8080", "-volume.max", "0"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-evalix_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-evalix_minio_2024}
+    volumes:
+      - s3_data:/data
+    ports:
+      - "127.0.0.1:9000:9000" # S3 API
+      - "127.0.0.1:9333:9333" # SeaweedFS console
+
+  # ---------------- FastAPI backend ----------------
+  backend:
+    build:
+      context: ./backend
+    container_name: evalix-backend
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      s3:
+        condition: service_started
+    environment:
+      ENVIRONMENT: production
+      DOCS_ENABLED: "false"
+      MONGODB_URL: mongodb://mongo:27017
+      MONGODB_DB_NAME: evalixai
+      REDIS_URL: redis://:${REDIS_PASSWORD:-evalix_redis_2024}@redis:6379
+      QDRANT_URL: http://qdrant:6333
+      MINIO_ENDPOINT: s3:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-evalix_minio}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-evalix_minio_2024}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET in .env}
+      JWT_ACCESS_TTL: "900"
+      JWT_REFRESH_TTL: "604800"
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:3000}
+      TRUST_PROXY: "false"
+    ports:
+      - "8000:8000"
+
+  # ---------------- Next.js frontend ----------------
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    container_name: evalix-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "3000:3000"
+
+  # ---------------- One-shot seeder (demo dataset) ----------------
+  seed:
+    profiles: ["seed"]
+    build:
+      context: ./backend
+    container_name: evalix-seed
+    depends_on:
+      mongo:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      s3:
+        condition: service_started
+    environment:
+      MONGODB_URL: mongodb://mongo:27017
+      MONGODB_DB_NAME: evalixai
+      QDRANT_URL: http://qdrant:6333
+      ENABLE_OBJECT_STORAGE: "false"
+      REDIS_URL: redis://:${REDIS_PASSWORD:-evalix_redis_2024}@redis:6379
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET in .env}
+    command: ["python", "scripts/seed.py"]
+
+volumes:
+  mongo_data:
+  redis_data:
+  qdrant_data:
+  s3_data:
